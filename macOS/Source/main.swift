@@ -8,7 +8,7 @@ enum UpdateState {
     case updateReady(dmgURL: URL)
 }
 
-enum AppMode {
+enum AppMode: String {
     case stopwatch
     case pomodoro
 }
@@ -18,56 +18,53 @@ enum PomodoroSession {
     case `break`
 }
 
+private struct GitHubRelease: Decodable {
+    struct Asset: Decodable {
+        let name: String
+        let browser_download_url: String
+    }
+    let tag_name: String
+    let assets: [Asset]
+}
+
 class AutoUpdater: NSObject {
+    private static let allowedDownloadPrefix = "https://github.com/auxetics/wfhtimer/releases/download/"
     var currentState: UpdateState = .upToDate
     var currentVersion: String {
-        return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.7"
     }
     
     func checkForUpdates() {
-        let url = URL(string: "https://api.github.com/repos/Auxetics/WFHTimer/releases/latest")!
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
-            guard let data = data, error == nil else { return }
-            do {
-                if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-                   let tagName = json["tag_name"] as? String,
-                   let assets = json["assets"] as? [[String: Any]] {
-                    
-                    let version = tagName.replacingOccurrences(of: "v", with: "")
-                    if version.compare(self.currentVersion, options: .numeric) == .orderedDescending {
-                        if let dmgAsset = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".dmg") == true }),
-                           let downloadURLString = dmgAsset["browser_download_url"] as? String,
-                           let downloadURL = URL(string: downloadURLString) {
-                            self.downloadUpdate(url: downloadURL)
-                        }
-                    }
-                }
-            } catch {
-                print("Error parsing JSON: \(error)")
-            }
-        }
-        task.resume()
+        guard let url = URL(string: "https://api.github.com/repos/Auxetics/WFHTimer/releases/latest") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("WFHTimer-Updater", forHTTPHeaderField: "User-Agent")
+        
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            guard let data = data, error == nil,
+                  let release = try? JSONDecoder().decode(GitHubRelease.self, from: data) else { return }
+            
+            let version = release.tag_name.replacingOccurrences(of: "v", with: "")
+            guard version.compare(self.currentVersion, options: .numeric) == .orderedDescending,
+                  let dmgAsset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }),
+                  dmgAsset.browser_download_url.lowercased().hasPrefix(Self.allowedDownloadPrefix),
+                  let downloadURL = URL(string: dmgAsset.browser_download_url) else { return }
+            
+            self.downloadUpdate(url: downloadURL)
+        }.resume()
     }
     
     func downloadUpdate(url: URL) {
-        DispatchQueue.main.async {
-            self.currentState = .downloading
-        }
+        DispatchQueue.main.async { self.currentState = .downloading }
         
-        let task = URLSession.shared.downloadTask(with: url) { localURL, response, error in
+        URLSession.shared.downloadTask(with: url) { localURL, _, error in
             guard let localURL = localURL, error == nil else {
                 DispatchQueue.main.async { self.currentState = .upToDate }
                 return
             }
-            let fileManager = FileManager.default
-            let tempDir = fileManager.temporaryDirectory
-            let destinationURL = tempDir.appendingPathComponent("WFHTimer_Update.dmg")
+            let destinationURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("WFHTimer_Update_\(UUID().uuidString).dmg")
             do {
-                if fileManager.fileExists(atPath: destinationURL.path) {
-                    try fileManager.removeItem(at: destinationURL)
-                }
-                try fileManager.moveItem(at: localURL, to: destinationURL)
-                
+                try FileManager.default.moveItem(at: localURL, to: destinationURL)
                 DispatchQueue.main.async {
                     self.currentState = .updateReady(dmgURL: destinationURL)
                 }
@@ -75,35 +72,28 @@ class AutoUpdater: NSObject {
                 print("Failed to save update DMG: \(error)")
                 DispatchQueue.main.async { self.currentState = .upToDate }
             }
-        }
-        task.resume()
+        }.resume()
     }
     
     func applyUpdate(dmgURL: URL) {
+        let mountPoint = "/Volumes/WFHTimerUpdate_\(ProcessInfo.processInfo.processIdentifier)"
         let script = """
-        #!/bin/bash
-        sleep 3
-        hdiutil attach "\(dmgURL.path)" -nobrowse -mountpoint /Volumes/WFHTimerUpdate
+        sleep 2
+        hdiutil attach "$1" -nobrowse -mountpoint "$2"
         rm -rf "/Applications/WFHTimer.app"
-        cp -R "/Volumes/WFHTimerUpdate/WFHTimer.app" "/Applications/"
-        hdiutil detach /Volumes/WFHTimerUpdate -force
+        cp -R "$2/WFHTimer.app" "/Applications/"
+        hdiutil detach "$2" -force
+        rm -f "$1"
         open "/Applications/WFHTimer.app"
         """
         
-        let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("update_wfhtimer.sh")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
+        process.arguments = ["/bin/bash", "-c", script, "_", dmgURL.path, mountPoint]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         do {
-            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
-            
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
-            process.arguments = ["/bin/bash", scriptURL.path]
-            if #available(macOS 10.13, *) {
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-            }
             try process.run()
-            
             NSApp.terminate(nil)
         } catch {
             print("Failed to run update script: \(error)")
@@ -118,12 +108,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var startTime: Date?
     var accumulatedTime: TimeInterval = 0
     var isRunning = false
-    var mode: AppMode = .stopwatch
+    var mode: AppMode = .stopwatch {
+        didSet { UserDefaults.standard.set(mode.rawValue, forKey: "appMode") }
+    }
     var pomodoroSession: PomodoroSession = .work
     var pomodoroRemainingSeconds: TimeInterval = 0
     
     var lastClickTime: Date?
     let updater = AutoUpdater()
+    
+    var workDuration: Int {
+        get { max(1, UserDefaults.standard.integer(forKey: "workDuration")) }
+        set { UserDefaults.standard.set(newValue, forKey: "workDuration") }
+    }
+    
+    var breakDuration: Int {
+        get { max(1, UserDefaults.standard.integer(forKey: "breakDuration")) }
+        set { UserDefaults.standard.set(newValue, forKey: "breakDuration") }
+    }
+    
+    var currentSessionDuration: TimeInterval {
+        TimeInterval((pomodoroSession == .work ? workDuration : breakDuration) * 60)
+    }
+    
+    var hasActiveTimer: Bool {
+        isRunning || (mode == .stopwatch ? accumulatedTime > 0 : pomodoroRemainingSeconds < currentSessionDuration)
+    }
     
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -134,28 +144,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             button.sendAction(on: [.leftMouseDown, .rightMouseDown])
         }
         
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         UNUserNotificationCenter.current().delegate = self
         
-        // Load defaults if empty
-        if UserDefaults.standard.integer(forKey: "workDuration") == 0 {
-            UserDefaults.standard.set(25, forKey: "workDuration")
-        }
-        if UserDefaults.standard.integer(forKey: "breakDuration") == 0 {
-            UserDefaults.standard.set(5, forKey: "breakDuration")
+        UserDefaults.standard.register(defaults: [
+            "workDuration": 25,
+            "breakDuration": 5,
+            "appMode": AppMode.stopwatch.rawValue
+        ])
+        if let savedMode = UserDefaults.standard.string(forKey: "appMode"),
+           let restoredMode = AppMode(rawValue: savedMode) {
+            mode = restoredMode
         }
         
         reset()
         updater.checkForUpdates()
     }
     
-    // Show notifications even if app is focused
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        if #available(macOS 11.0, *) {
-            completionHandler([.banner, .sound])
-        } else {
-            completionHandler([.alert, .sound])
-        }
+        completionHandler([.banner, .sound])
     }
     
     @objc func handleClick() {
@@ -169,23 +176,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let now = Date()
         if let lastClick = lastClickTime, now.timeIntervalSince(lastClick) < 0.35 {
             lastClickTime = nil
-            handleDoubleClick()
+            reset()
         } else {
             lastClickTime = now
-            handleSingleClick()
+            isRunning ? pause() : start()
         }
-    }
-    
-    @objc func handleSingleClick() {
-        if isRunning {
-            pause()
-        } else {
-            start()
-        }
-    }
-    
-    @objc func handleDoubleClick() {
-        reset()
     }
     
     func start() {
@@ -222,9 +217,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         startTime = nil
         
         if mode == .pomodoro {
-            let workMins = UserDefaults.standard.integer(forKey: "workDuration")
-            pomodoroRemainingSeconds = TimeInterval(workMins * 60)
             pomodoroSession = .work
+            pomodoroRemainingSeconds = currentSessionDuration
         }
         
         updateTime()
@@ -257,16 +251,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let content = UNMutableNotificationContent()
                 content.title = title
                 content.body = body
-                content.sound = UNNotificationSound.default
+                content.sound = .default
                 let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
                 UNUserNotificationCenter.current().add(request)
             } else {
                 DispatchQueue.main.async {
-                    let script = "display notification \"\(body)\" with title \"\(title)\" sound name \"Glass\""
+                    let safeTitle = title.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                    let safeBody = body.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                    let script = "display notification \"\(safeBody)\" with title \"\(safeTitle)\" sound name \"Glass\""
                     var error: NSDictionary?
-                    if let appleScript = NSAppleScript(source: script) {
-                        appleScript.executeAndReturnError(&error)
-                    }
+                    NSAppleScript(source: script)?.executeAndReturnError(&error)
                 }
             }
         }
@@ -280,17 +274,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         
         if pomodoroSession == .work {
             pomodoroSession = .break
-            let breakMins = UserDefaults.standard.integer(forKey: "breakDuration")
-            pomodoroRemainingSeconds = TimeInterval(breakMins * 60)
+            pomodoroRemainingSeconds = currentSessionDuration
             sendRobustNotification(title: "Work Session Complete!", body: "Time for a break.")
         } else {
             pomodoroSession = .work
-            let workMins = UserDefaults.standard.integer(forKey: "workDuration")
-            pomodoroRemainingSeconds = TimeInterval(workMins * 60)
+            pomodoroRemainingSeconds = currentSessionDuration
             sendRobustNotification(title: "Break Over!", body: "Back to work.")
         }
         
-        // Auto start next phase
         start()
     }
     
@@ -299,64 +290,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let minutes = (totalSeconds % 3600) / 60
         let secs = totalSeconds % 60
         
-        let timeString: String
-        if hours >= 1 {
-            timeString = String(format: "%02d:%02d:%02d", hours, minutes, secs)
-        } else {
-            timeString = String(format: "%02d:%02d", minutes, secs)
-        }
+        let timeString = hours >= 1
+            ? String(format: "%02d:%02d:%02d", hours, minutes, secs)
+            : String(format: "%02d:%02d", minutes, secs)
         
-        if let button = statusItem.button {
-            let fontSize = NSFont.systemFontSize
-            let font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .regular)
-            
-            let textColor: NSColor = (mode == .pomodoro && pomodoroSession == .break) ? NSColor.systemOrange : NSColor.labelColor
-            
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: textColor
-            ]
-            
-            let attributedTime = NSMutableAttributedString(string: timeString, attributes: attributes)
-            
-            let hasStartedStopwatch = mode == .stopwatch && (accumulatedTime > 0 || isRunning)
-            let hasStartedPomodoro = mode == .pomodoro && (pomodoroRemainingSeconds < TimeInterval(UserDefaults.standard.integer(forKey: "workDuration") * 60) || isRunning)
-            let shouldShowDot = hasStartedStopwatch || hasStartedPomodoro
-            
-            let finalString = NSMutableAttributedString()
-            
-            if shouldShowDot {
-                let dotColor: NSColor = isRunning ? NSColor.systemGreen : NSColor.systemOrange
-                let dotAttr: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: dotColor
-                ]
-                let dotString = NSAttributedString(string: "● ", attributes: dotAttr)
-                finalString.append(dotString)
-            }
-            
-            finalString.append(attributedTime)
-            
-            button.attributedTitle = finalString
+        guard let button = statusItem.button else { return }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        let textColor: NSColor = (mode == .pomodoro && pomodoroSession == .break) ? .systemOrange : .labelColor
+        
+        let finalString = NSMutableAttributedString()
+        if hasActiveTimer {
+            let dotColor: NSColor = isRunning ? .systemGreen : .systemOrange
+            finalString.append(NSAttributedString(string: "● ", attributes: [.font: font, .foregroundColor: dotColor]))
         }
+        finalString.append(NSAttributedString(string: timeString, attributes: [.font: font, .foregroundColor: textColor]))
+        button.attributedTitle = finalString
     }
     
     func showMenu(event: NSEvent) {
         let menu = NSMenu()
         
-        // Toggle Mode
         let modeItem = NSMenuItem(title: mode == .stopwatch ? "Switch to Pomodoro Mode" : "Switch to Stopwatch Mode", action: #selector(toggleMode), keyEquivalent: "")
         modeItem.target = self
         menu.addItem(modeItem)
         
-        // Preferences
+        if mode == .pomodoro {
+            let skipTitle = pomodoroSession == .work ? "Skip to Break" : "Skip to Work"
+            let skipItem = NSMenuItem(title: skipTitle, action: #selector(skipPhase), keyEquivalent: "")
+            skipItem.target = self
+            menu.addItem(skipItem)
+        }
+        
         let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(openPreferences), keyEquivalent: ",")
         prefsItem.target = self
         menu.addItem(prefsItem)
         
-        menu.addItem(NSMenuItem.separator())
+        menu.addItem(.separator())
         
-        // Auto-Updater
         let updateItem = NSMenuItem()
         updateItem.target = self
         switch updater.currentState {
@@ -366,31 +336,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         case .downloading:
             updateItem.title = "Downloading Update..."
             updateItem.action = nil
-        case .updateReady(_):
+        case .updateReady:
             updateItem.title = "Update Now!"
             updateItem.action = #selector(performUpdate)
         }
         menu.addItem(updateItem)
-        menu.addItem(NSMenuItem.separator())
+        menu.addItem(.separator())
         
-        // Launch on Startup
         let autorunItem = NSMenuItem(title: "Launch on Startup", action: #selector(toggleAutorun), keyEquivalent: "")
         autorunItem.target = self
-        if #available(macOS 13.0, *) {
-            autorunItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        }
+        autorunItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(autorunItem)
         
-        menu.addItem(NSMenuItem.separator())
+        menu.addItem(.separator())
         
-        // Donate
         let donateItem = NSMenuItem(title: "Donate", action: #selector(openDonate), keyEquivalent: "")
         donateItem.target = self
         menu.addItem(donateItem)
         
-        menu.addItem(NSMenuItem.separator())
+        menu.addItem(.separator())
         
-        // Quit
         let quitItem = NSMenuItem(title: "Quit WFHTimer", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -405,6 +370,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         reset()
     }
     
+    @objc func skipPhase() {
+        let wasRunning = isRunning
+        isRunning = false
+        timer?.invalidate()
+        timer = nil
+        startTime = nil
+        
+        pomodoroSession = (pomodoroSession == .work) ? .break : .work
+        pomodoroRemainingSeconds = currentSessionDuration
+        
+        if wasRunning {
+            start()
+        } else {
+            updateTime()
+        }
+    }
+    
     @objc func openPreferences() {
         let alert = NSAlert()
         alert.messageText = "Pomodoro Preferences"
@@ -417,7 +399,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         view.addSubview(workLabel)
         
         let workInput = NSTextField(frame: NSRect(x: 60, y: 35, width: 140, height: 20))
-        workInput.stringValue = String(UserDefaults.standard.integer(forKey: "workDuration"))
+        workInput.stringValue = String(workDuration)
         view.addSubview(workInput)
         
         let breakLabel = NSTextField(labelWithString: "Break:")
@@ -425,21 +407,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         view.addSubview(breakLabel)
         
         let breakInput = NSTextField(frame: NSRect(x: 60, y: 5, width: 140, height: 20))
-        breakInput.stringValue = String(UserDefaults.standard.integer(forKey: "breakDuration"))
+        breakInput.stringValue = String(breakDuration)
         view.addSubview(breakInput)
         
         alert.accessoryView = view
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         
-        // Bring to front
         NSApp.activate(ignoringOtherApps: true)
         
         if alert.runModal() == .alertFirstButtonReturn {
-            if let w = Int(workInput.stringValue), w > 0 { UserDefaults.standard.set(w, forKey: "workDuration") }
-            if let b = Int(breakInput.stringValue), b > 0 { UserDefaults.standard.set(b, forKey: "breakDuration") }
+            if let w = Int(workInput.stringValue), w > 0 { workDuration = w }
+            if let b = Int(breakInput.stringValue), b > 0 { breakDuration = b }
             if mode == .pomodoro && !isRunning {
-                reset() // refresh immediately
+                reset()
             }
         }
     }
@@ -449,7 +430,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
     
     @objc func performUpdate() {
-        if isRunning || (mode == .stopwatch ? accumulatedTime > 0 : pomodoroRemainingSeconds < TimeInterval(UserDefaults.standard.integer(forKey: "workDuration") * 60)) {
+        if hasActiveTimer {
             let alert = NSAlert()
             alert.messageText = "Cannot Update"
             alert.informativeText = "Please reset the timer before applying an update to prevent losing your tracked time."
@@ -466,16 +447,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
     
     @objc func toggleAutorun() {
-        if #available(macOS 13.0, *) {
-            do {
-                if SMAppService.mainApp.status == .enabled {
-                    try SMAppService.mainApp.unregister()
-                } else {
-                    try SMAppService.mainApp.register()
-                }
-            } catch {
-                print("Failed to toggle autorun: \(error)")
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
             }
+        } catch {
+            print("Failed to toggle autorun: \(error)")
         }
     }
     

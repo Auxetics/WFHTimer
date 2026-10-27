@@ -1,14 +1,19 @@
 #!/bin/bash
 set -e
 
-VERSION=${1:-"1.0"}
+VERSION=${1:-"1.7"}
 echo "Building WFHTimer version $VERSION..."
 
-echo "Compiling Swift Source..."
+echo "Compiling Universal Swift Binary (arm64 + x86_64)..."
 mkdir -p "WFHTimer.app/Contents/MacOS"
 mkdir -p "WFHTimer.app/Contents/Resources"
 cp AppIcon.icns "WFHTimer.app/Contents/Resources/"
-swiftc -target arm64-apple-macos13.0 Source/main.swift -o "WFHTimer.app/Contents/MacOS/WFHTimer"
+swiftc -O -target arm64-apple-macos13.0 Source/main.swift -o "WFHTimer.app/Contents/MacOS/WFHTimer_arm64"
+swiftc -O -target x86_64-apple-macos13.0 Source/main.swift -o "WFHTimer.app/Contents/MacOS/WFHTimer_x86_64"
+lipo -create -output "WFHTimer.app/Contents/MacOS/WFHTimer" \
+    "WFHTimer.app/Contents/MacOS/WFHTimer_arm64" \
+    "WFHTimer.app/Contents/MacOS/WFHTimer_x86_64"
+rm -f "WFHTimer.app/Contents/MacOS/WFHTimer_arm64" "WFHTimer.app/Contents/MacOS/WFHTimer_x86_64"
 
 echo "Creating PkgInfo..."
 echo -n "APPL????" > "WFHTimer.app/Contents/PkgInfo"

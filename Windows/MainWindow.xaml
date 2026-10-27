@@ -9,6 +9,7 @@
         <Grid.ContextMenu>
             <ContextMenu>
                 <MenuItem x:Name="MenuMode" Header="Switch to Pomodoro Mode" Click="MenuMode_Click" />
+                <MenuItem x:Name="MenuSkip" Header="Skip to Break" Click="MenuSkip_Click" Visibility="Collapsed" />
                 <MenuItem Header="Preferences..." Click="MenuSettings_Click" />
                 <Separator />
                 <MenuItem x:Name="MenuUpdate" Header="Up to Date" Click="MenuUpdate_Click" />

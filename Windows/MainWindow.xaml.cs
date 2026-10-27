@@ -20,6 +20,7 @@ namespace WFHTimer
     {
         public int WorkDuration { get; set; } = 25;
         public int BreakDuration { get; set; } = 5;
+        public AppMode Mode { get; set; } = AppMode.Stopwatch;
     }
 
     public enum AppMode { Stopwatch, Pomodoro }
@@ -27,6 +28,16 @@ namespace WFHTimer
 
     public partial class MainWindow : Window
     {
+        private const string AllowedDownloadPrefix = "https://github.com/Auxetics/WFHTimer/releases/download/";
+        private static readonly HttpClient Http = CreateHttpClient();
+
+        private static HttpClient CreateHttpClient()
+        {
+            var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("User-Agent", "WFHTimer-Updater");
+            return client;
+        }
+
         private DispatcherTimer _timer;
         private DispatcherTimer _positionTimer;
         private DateTime _startTime;
@@ -40,8 +51,14 @@ namespace WFHTimer
         private AppSettings _settings;
         private string _settingsPath;
         
-        private readonly string AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(2) ?? "1.0";
+        private readonly string AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(2) ?? "1.7";
         private string _downloadUrl = "";
+
+        private TimeSpan CurrentSessionDuration =>
+            TimeSpan.FromMinutes(_pomodoroSession == PomodoroSession.Work ? _settings.WorkDuration : _settings.BreakDuration);
+
+        private bool HasActiveTimer =>
+            _isRunning || (_mode == AppMode.Stopwatch ? _elapsedTime.TotalSeconds > 0 : _pomodoroRemaining < CurrentSessionDuration);
         
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr FindWindow(string lpClassName, string? lpWindowName);
@@ -100,6 +117,7 @@ namespace WFHTimer
             
             _settingsPath = Path.Combine(appDataPath, "settings.json");
             LoadSettings();
+            _mode = _settings.Mode;
             
             _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             _timer.Tick += Timer_Tick;
@@ -109,7 +127,7 @@ namespace WFHTimer
             
             CheckStartupStatus();
             CheckForUpdates();
-            UpdateUI();
+            ResetTimer();
         }
 
         private void LoadSettings()
@@ -183,8 +201,8 @@ namespace WFHTimer
             
             if (_mode == AppMode.Pomodoro && _pomodoroRemaining.TotalSeconds <= 0)
             {
-                _pomodoroRemaining = TimeSpan.FromMinutes(_settings.WorkDuration);
                 _pomodoroSession = PomodoroSession.Work;
+                _pomodoroRemaining = CurrentSessionDuration;
                 TimeText.Text = FormatTime(_pomodoroRemaining);
             }
             
@@ -221,8 +239,8 @@ namespace WFHTimer
             }
             else
             {
-                _pomodoroRemaining = TimeSpan.FromMinutes(_settings.WorkDuration);
                 _pomodoroSession = PomodoroSession.Work;
+                _pomodoroRemaining = CurrentSessionDuration;
                 TimeText.Text = FormatTime(_pomodoroRemaining);
             }
             UpdateUI();
@@ -236,7 +254,7 @@ namespace WFHTimer
             if (_pomodoroSession == PomodoroSession.Work)
             {
                 _pomodoroSession = PomodoroSession.Break;
-                _pomodoroRemaining = TimeSpan.FromMinutes(_settings.BreakDuration);
+                _pomodoroRemaining = CurrentSessionDuration;
                 new ToastContentBuilder()
                     .AddText("Work Session Complete!")
                     .AddText("Time for a break.")
@@ -245,36 +263,48 @@ namespace WFHTimer
             else
             {
                 _pomodoroSession = PomodoroSession.Work;
-                _pomodoroRemaining = TimeSpan.FromMinutes(_settings.WorkDuration);
+                _pomodoroRemaining = CurrentSessionDuration;
                 new ToastContentBuilder()
                     .AddText("Break Over!")
                     .AddText("Back to work.")
                     .Show();
             }
             
-            // Auto start next phase
-            _startTime = DateTime.Now;
-            _timer.Start();
-            _isRunning = true;
-            UpdateUI();
+            TimeText.Text = FormatTime(_pomodoroRemaining);
+            StartTimer();
         }
 
         private void UpdateUI()
         {
-            bool hasStartedStopwatch = _mode == AppMode.Stopwatch && (_elapsedTime.TotalSeconds > 0 || _isRunning);
-            bool hasStartedPomodoro = _mode == AppMode.Pomodoro && (_pomodoroRemaining < TimeSpan.FromMinutes(_settings.WorkDuration) || _isRunning);
-            
-            StatusDot.Visibility = (hasStartedStopwatch || hasStartedPomodoro) ? Visibility.Visible : Visibility.Collapsed;
+            StatusDot.Visibility = HasActiveTimer ? Visibility.Visible : Visibility.Collapsed;
             StatusDot.Fill = _isRunning ? Brushes.LimeGreen : Brushes.Orange;
             TimeText.Foreground = (_mode == AppMode.Pomodoro && _pomodoroSession == PomodoroSession.Break) ? Brushes.Orange : Brushes.White;
+            MenuMode.Header = _mode == AppMode.Stopwatch ? "Switch to Pomodoro Mode" : "Switch to Stopwatch Mode";
+            MenuSkip.Visibility = _mode == AppMode.Pomodoro ? Visibility.Visible : Visibility.Collapsed;
+            MenuSkip.Header = _pomodoroSession == PomodoroSession.Work ? "Skip to Break" : "Skip to Work";
         }
 
         private void MenuMode_Click(object sender, RoutedEventArgs e)
         {
             PauseTimer();
             _mode = _mode == AppMode.Stopwatch ? AppMode.Pomodoro : AppMode.Stopwatch;
-            MenuMode.Header = _mode == AppMode.Stopwatch ? "Switch to Pomodoro Mode" : "Switch to Stopwatch Mode";
+            _settings.Mode = _mode;
+            SaveSettings();
             ResetTimer();
+        }
+
+        private void MenuSkip_Click(object sender, RoutedEventArgs e)
+        {
+            bool wasRunning = _isRunning;
+            _isRunning = false;
+            _timer.Stop();
+
+            _pomodoroSession = _pomodoroSession == PomodoroSession.Work ? PomodoroSession.Break : PomodoroSession.Work;
+            _pomodoroRemaining = CurrentSessionDuration;
+            TimeText.Text = FormatTime(_pomodoroRemaining);
+
+            if (wasRunning) StartTimer();
+            else UpdateUI();
         }
 
         private void MenuSettings_Click(object sender, RoutedEventArgs e)
@@ -343,7 +373,7 @@ namespace WFHTimer
 
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(runKey, true)!)
             {
-                if (MenuStartup.IsChecked) key.SetValue("WFHTimer", path);
+                if (MenuStartup.IsChecked) key.SetValue("WFHTimer", $"\"{path}\"");
                 else key.DeleteValue("WFHTimer", false);
             }
         }
@@ -371,9 +401,7 @@ namespace WFHTimer
         {
             try
             {
-                using var client = new HttpClient();
-                client.DefaultRequestHeaders.Add("User-Agent", "WFHTimer-Updater");
-                var response = await client.GetStringAsync("https://api.github.com/repos/Auxetics/WFHTimer/releases/latest");
+                var response = await Http.GetStringAsync("https://api.github.com/repos/Auxetics/WFHTimer/releases/latest");
                 var release = JsonSerializer.Deserialize<GitHubRelease>(response);
 
                 if (release != null && release.tag_name != null)
@@ -385,7 +413,8 @@ namespace WFHTimer
                         {
                             foreach (var asset in release.assets)
                             {
-                                if (asset.name.EndsWith(".exe"))
+                                if (asset.name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
+                                    asset.browser_download_url.StartsWith(AllowedDownloadPrefix, StringComparison.OrdinalIgnoreCase))
                                 {
                                     _downloadUrl = asset.browser_download_url;
                                     Dispatcher.Invoke(() => MenuUpdate.Header = "Update Now!");
@@ -405,14 +434,13 @@ namespace WFHTimer
 
         private async void MenuUpdate_Click(object sender, RoutedEventArgs e)
         {
-            bool hasTime = _mode == AppMode.Stopwatch ? _elapsedTime.TotalSeconds > 0 : _pomodoroRemaining < TimeSpan.FromMinutes(_settings.WorkDuration);
-            if (_isRunning || hasTime)
+            if (HasActiveTimer)
             {
                 MessageBox.Show("Please reset the timer before applying an update to prevent losing your tracked time.", "Cannot Update", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            if (string.IsNullOrEmpty(_downloadUrl))
+            if (string.IsNullOrEmpty(_downloadUrl) || !_downloadUrl.StartsWith(AllowedDownloadPrefix, StringComparison.OrdinalIgnoreCase))
             {
                 CheckForUpdates();
                 return;
@@ -423,26 +451,20 @@ namespace WFHTimer
 
             try
             {
-                using var client = new HttpClient();
-                var exeBytes = await client.GetByteArrayAsync(_downloadUrl);
+                var exeBytes = await Http.GetByteArrayAsync(_downloadUrl);
                 
-                string tempExe = Path.Combine(Path.GetTempPath(), "WFHTimer_Update.exe");
+                string tempExe = Path.Combine(Path.GetTempPath(), $"WFHTimer_Update_{Guid.NewGuid():N}.exe");
                 await File.WriteAllBytesAsync(tempExe, exeBytes);
 
                 string currentExe = Environment.ProcessPath!;
-                string batchScript = Path.Combine(Path.GetTempPath(), "update_wfhtimer.bat");
-                
-                string scriptContent = $@"
-@echo off
-timeout /t 2 /nobreak > nul
-del ""{currentExe}""
-move /y ""{tempExe}"" ""{currentExe}""
-start """" ""{currentExe}""
-del ""%~f0""
-";
-                File.WriteAllText(batchScript, scriptContent);
-
-                Process.Start(new ProcessStartInfo { FileName = batchScript, WindowStyle = ProcessWindowStyle.Hidden, CreateNoWindow = true });
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c timeout /t 2 /nobreak > nul & move /y \"{tempExe}\" \"{currentExe}\" > nul & start \"\" \"{currentExe}\"",
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                });
                 Application.Current.Shutdown();
             }
             catch

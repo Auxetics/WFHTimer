@@ -9,3 +9,7 @@ build_dmg/
 *.app/
 bin/
 obj/
+mac active.png
+mac paused.png
+windows active.png
+windows paused.png
