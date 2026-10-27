@@ -31,7 +31,7 @@ class AutoUpdater: NSObject {
     private static let allowedDownloadPrefix = "https://github.com/auxetics/wfhtimer/releases/download/"
     var currentState: UpdateState = .upToDate
     var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.7.1"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.7.2"
     }
     
     func checkForUpdates() {

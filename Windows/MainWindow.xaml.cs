@@ -12,7 +12,6 @@ using System.IO;
 using System.Reflection;
 using System.Windows.Interop;
 using System.Windows.Media;
-using Microsoft.Toolkit.Uwp.Notifications;
 
 namespace WFHTimer
 {
@@ -53,11 +52,12 @@ namespace WFHTimer
         
         private readonly string AppVersion = GetAppVersion();
         private string _downloadUrl = "";
+        private System.Windows.Forms.NotifyIcon? _notifyIcon;
 
         private static string GetAppVersion()
         {
             var v = Assembly.GetExecutingAssembly().GetName().Version;
-            if (v == null) return "1.7.1";
+            if (v == null) return "1.7.2";
             return v.Build > 0 ? v.ToString(3) : v.ToString(2);
         }
 
@@ -253,6 +253,26 @@ namespace WFHTimer
             UpdateUI();
         }
 
+        private void ShowNotification(string title, string body)
+        {
+            try
+            {
+                if (_notifyIcon == null)
+                {
+                    _notifyIcon = new System.Windows.Forms.NotifyIcon
+                    {
+                        Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? System.Drawing.SystemIcons.Application,
+                        Text = "WFH Timer"
+                    };
+                    _notifyIcon.BalloonTipClosed += (_, _) => _notifyIcon.Visible = false;
+                    _notifyIcon.BalloonTipClicked += (_, _) => _notifyIcon.Visible = false;
+                }
+                _notifyIcon.Visible = true;
+                _notifyIcon.ShowBalloonTip(4000, title, body, System.Windows.Forms.ToolTipIcon.None);
+            }
+            catch { }
+        }
+
         private void HandlePomodoroEnd()
         {
             _isRunning = false;
@@ -262,19 +282,13 @@ namespace WFHTimer
             {
                 _pomodoroSession = PomodoroSession.Break;
                 _pomodoroRemaining = CurrentSessionDuration;
-                new ToastContentBuilder()
-                    .AddText("Work Session Complete!")
-                    .AddText("Time for a break.")
-                    .Show();
+                ShowNotification("Work Session Complete!", "Time for a break.");
             }
             else
             {
                 _pomodoroSession = PomodoroSession.Work;
                 _pomodoroRemaining = CurrentSessionDuration;
-                new ToastContentBuilder()
-                    .AddText("Break Over!")
-                    .AddText("Back to work.")
-                    .Show();
+                ShowNotification("Break Over!", "Back to work.");
             }
             
             TimeText.Text = FormatTime(_pomodoroRemaining);
@@ -401,6 +415,11 @@ namespace WFHTimer
 
         private void MenuQuit_Click(object sender, RoutedEventArgs e)
         {
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.Visible = false;
+                _notifyIcon.Dispose();
+            }
             Application.Current.Shutdown();
         }
 
