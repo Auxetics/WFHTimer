@@ -51,8 +51,15 @@ namespace WFHTimer
         private AppSettings _settings;
         private string _settingsPath;
         
-        private readonly string AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(2) ?? "1.7";
+        private readonly string AppVersion = GetAppVersion();
         private string _downloadUrl = "";
+
+        private static string GetAppVersion()
+        {
+            var v = Assembly.GetExecutingAssembly().GetName().Version;
+            if (v == null) return "1.7.1";
+            return v.Build > 0 ? v.ToString(3) : v.ToString(2);
+        }
 
         private TimeSpan CurrentSessionDuration =>
             TimeSpan.FromMinutes(_pomodoroSession == PomodoroSession.Work ? _settings.WorkDuration : _settings.BreakDuration);

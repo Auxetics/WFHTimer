@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-VERSION=${1:-"1.7"}
+VERSION=${1:-"1.7.1"}
 echo "Building WFHTimer version $VERSION..."
 
 echo "Compiling Universal Swift Binary (arm64 + x86_64)..."
